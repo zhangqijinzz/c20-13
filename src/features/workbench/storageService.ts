@@ -56,9 +56,3 @@ function writeToDatabase(database: IDBDatabase, value: string): Promise<void> {
     request.onerror = () => reject(request.error ?? new Error('IndexedDB write failed'))
   })
 }
-
-export function isWorkspaceDocument(value: unknown): value is WorkspaceDocument {
-  if (!value || typeof value !== 'object') return false
-  const candidate = value as Partial<WorkspaceDocument>
-  return candidate.version === 1 && Array.isArray(candidate.plans) && typeof candidate.activePlanId === 'string'
-}
