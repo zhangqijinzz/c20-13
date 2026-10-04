@@ -10,10 +10,10 @@ import {
   type WorkspacePlan,
   type WorkspaceStatus,
 } from '../../shared/models'
-import { clampDeskSize, clampItemDimension } from '../../shared/layoutRules'
 import { moveCanvasItem, rotateCanvasItem } from '../canvas/canvasViewModel'
 import { createMaterialDraft } from '../materials/materialsViewModel'
 import { inspectPlan } from '../inspection/inspectionViewModel'
+import { addItemToPlan, editDeskSize, editItem, type DeskSizeField, type ItemPatch } from './planEditor'
 import { LocalWorkspaceRepository, type WorkspaceRepository } from './workspaceRepository'
 
 export interface WorkspaceViewModel {
@@ -31,8 +31,8 @@ export interface WorkspaceViewModel {
   removeItem: (id: string) => void
   moveItem: (id: string, x: number, y: number) => void
   rotateItem: (id: string, delta: number) => void
-  updateItem: (id: string, patch: Partial<Pick<DeskItem, 'widthMm' | 'heightMm' | 'x' | 'y'>>) => void
-  updateDesk: (field: 'deskWidthMm' | 'deskHeightMm', value: number) => void
+  updateItem: (id: string, patch: ItemPatch) => void
+  updateDesk: (field: DeskSizeField, value: number) => void
   createNewPlan: () => void
   duplicatePlan: () => void
   selectPlan: (id: string) => void
@@ -55,10 +55,15 @@ export function useWorkspaceViewModel(repository?: WorkspaceRepository): Workspa
     let active = true
     void repositoryRef.current.load().then((loaded) => {
       if (!active) return
-      const nextDocument = loaded ?? createInitialDocument()
-      setDocument(nextDocument)
-      setStatus('ready')
-      setFeedback(loaded ? '已恢复上次编辑状态' : '已创建示例工作台，可以直接拖动设备')
+      if (loaded) {
+        setDocument(loaded.document)
+        setStatus('ready')
+        setFeedback(loaded.repaired ? '检测到方案数据异常，已自动修复到可用状态' : '已恢复上次编辑状态')
+      } else {
+        setDocument(createInitialDocument())
+        setStatus('ready')
+        setFeedback('已创建示例工作台，可以直接拖动设备')
+      }
     }).catch(() => {
       if (!active) return
       setDocument(createInitialDocument())
@@ -91,7 +96,10 @@ export function useWorkspaceViewModel(repository?: WorkspaceRepository): Workspa
 
   const updateActivePlan = useCallback((updater: (plan: WorkspacePlan) => WorkspacePlan, message: string) => {
     if (!document || !activePlan) return
-    const nextPlan = { ...updater(activePlan), updatedAt: new Date().toISOString() }
+    const updatedPlan = updater(activePlan)
+    // 输入被拒绝（非法数字）时编辑器返回原对象引用：不产生变更，也不触发保存。
+    if (updatedPlan === activePlan) return
+    const nextPlan = { ...updatedPlan, updatedAt: new Date().toISOString() }
     const nextDocument = { ...document, plans: document.plans.map((plan) => plan.id === nextPlan.id ? nextPlan : plan) }
     void persist(nextDocument, message)
   }, [activePlan, document, persist])
@@ -101,7 +109,7 @@ export function useWorkspaceViewModel(repository?: WorkspaceRepository): Workspa
   const addItem = useCallback((type: DeviceType) => {
     if (!activePlan) return
     const draft = createMaterialDraft(type, activePlan.items.length)
-    updateActivePlan((plan) => ({ ...plan, items: [...plan.items, draft.item] }), draft.feedback)
+    updateActivePlan((plan) => addItemToPlan(plan, draft.item), draft.feedback)
     setSelectedItemId(draft.item.id)
   }, [activePlan, updateActivePlan])
 
@@ -111,29 +119,25 @@ export function useWorkspaceViewModel(repository?: WorkspaceRepository): Workspa
   }, [updateActivePlan])
 
   const moveItem = useCallback((id: string, x: number, y: number) => {
-    updateActivePlan((plan) => ({ ...plan, items: moveCanvasItem(plan.items, id, x, y) }), '位置已更新')
+    updateActivePlan((plan) => {
+      const items = moveCanvasItem(plan.items, id, x, y, plan.deskWidthMm, plan.deskHeightMm)
+      // 位置没有变化（边界处的拖拽、非法坐标）时返回原引用，避免触发无意义的保存。
+      return items === plan.items ? plan : { ...plan, items }
+    }, '位置已更新')
   }, [updateActivePlan])
 
   const rotateItem = useCallback((id: string, delta: number) => {
+    if (!Number.isFinite(delta)) return
     updateActivePlan((plan) => ({ ...plan, items: rotateCanvasItem(plan.items, id, delta) }), '角度已更新')
   }, [updateActivePlan])
 
-  const updateItem = useCallback((id: string, patch: Partial<Pick<DeskItem, 'widthMm' | 'heightMm' | 'x' | 'y'>>) => {
-    updateActivePlan((plan) => ({
-      ...plan,
-      items: plan.items.map((item) => item.id === id ? {
-        ...item,
-        ...patch,
-        widthMm: patch.widthMm === undefined ? item.widthMm : clampItemDimension(patch.widthMm, item.widthMm),
-        heightMm: patch.heightMm === undefined ? item.heightMm : clampItemDimension(patch.heightMm, item.heightMm),
-      } : item),
-    }), '尺寸参数已更新')
+  const updateItem = useCallback((id: string, patch: ItemPatch) => {
+    updateActivePlan((plan) => editItem(plan, id, patch), '尺寸参数已更新')
   }, [updateActivePlan])
 
-  const updateDesk = useCallback((field: 'deskWidthMm' | 'deskHeightMm', value: number) => {
-    if (!activePlan) return
-    updateActivePlan((plan) => ({ ...plan, [field]: clampDeskSize(value, plan[field]) }), '桌面尺寸已更新')
-  }, [activePlan, updateActivePlan])
+  const updateDesk = useCallback((field: DeskSizeField, value: number) => {
+    updateActivePlan((plan) => editDeskSize(plan, field, value), '桌面尺寸已更新')
+  }, [updateActivePlan])
 
   const createNewPlan = useCallback(() => {
     if (!document) return
